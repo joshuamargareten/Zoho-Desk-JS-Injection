@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Teklink Zoho Desk Helper",
+  "version": "1.9.0",
+  "description": "Composer formatting + robust attachment viewer for Zoho Desk.",
+  "permissions": [],
+  "host_permissions": ["*://desk.theteklink.com/*", "*://*.zohodesk.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://desk.theteklink.com/*", "*://*.zohodesk.com/*"],
+      "js": ["content.js", "content/replyEnhancements.js"],
+      "css": ["content/replyEnhancements.css"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "viewer.html",
+        "viewer.css",
+        "viewer.js",
+        "libs/docx-preview.min.js",
+        "libs/mammoth.browser.min.js",
+        "libs/xlsx.full.min.js",
+        "libs/jszip.min.js",
+        "libs/marked.min.js",
+        "libs/pptxjs.js",
+        "libs/pptxjs.css",
+        "libs/webodf.js",
+        "previewer.html"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "action": {
+    "default_title": "Teklink Zoho Desk Helper"
+  }
+}

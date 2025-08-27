@@ -1,0 +1,151 @@
+/* replyEnhancements.css — v4 */
+:root {
+    color-scheme: light;
+}
+
+/* Hide region after sign_holder::end when JS marks it */
+.KB_Editor [data-zd-q-hide="1"],
+.KB_Editor [data-zd-editor-hide="1"] {
+    display: none !important;
+}
+
+/* Toolbar + status badge */
+.zd-enh-editor-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    /*background: Canvas;
+    color: CanvasText;*/
+    /*border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);*/
+}
+
+.zd-enh-btn {
+    appearance: none;
+    /*border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+    background: color-mix(in srgb, Canvas 90%, CanvasText 10%);*/
+    color: inherit;
+    font: inherit;
+    padding: 6px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.zd-enh-btn:hover {
+    /*background: color-mix(in srgb, Canvas 84%, CanvasText 16%);*/
+}
+
+.zd-enh-badge {
+    font-size: 12px;
+    opacity: .8;
+    padding: 2px 6px;
+    border-radius: 6px;
+    /*border: 1px dashed color-mix(in srgb, CanvasText 30%, transparent);*/
+}
+
+/* Composer elevation: keep original size, just a gentle shrink + shadow */
+.zd-enh-composer-open {
+    max-width: calc(100% - 15px);
+    margin: 12px auto 24px auto;
+    padding: 10px 12px;
+    /*background: Canvas;
+    color: CanvasText;*/
+    box-shadow: 0 10px 22px rgba(0, 0, 0, .16), 0 3px 8px rgba(0, 0, 0, .10);
+    border: none !important;
+    border-radius: 12px;
+}
+
+/* Don’t add inner shadows on the Zoho editor */
+.zd-enh-composer-open .zd_v2-texteditor-textEditor {
+    box-shadow: none !important;
+}
+
+/* === Height handling (your “80%”) ===
+   Important: % heights only work if parents have explicit heights.
+   We instead cap to the viewport (vh) so the action buttons stay visible,
+   and make the editor scrolly instead of pushing the whole wrapper. */
+.zd-enh-height-80,
+.zd_v2-replyeditor-detailwrapper,
+.zd_v2-replyeditor-wrapper {
+    max-height: 80%;
+}
+
+/* Make the editable area scroll within that cap (keeps footer/actions visible) */
+.zd-enh-height-80 .zd_v2-texteditor-textEditor {
+    /* leave room for header rows + toolbar + footer actions */
+    max-height: clamp(300px, calc(80% - 240px), 900px);
+    overflow: auto;
+    scrollbar-gutter: stable both-edges;
+}
+
+/* Ensure the actual content has a comfortable minimum */
+.zd-enh-height-80 .KB_Editor {
+    min-height: 180px;
+}
+
+/* ---------- Toggle button in footer bar ---------- */
+.zd-enh-toolbar-holder {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: auto;
+    /* sits near the other left-side buttons */
+}
+
+.zd-enh-toolbar-toggle {
+    appearance: none;
+    /*border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);*/
+    /*background: color-mix(in srgb, Canvas 90%, CanvasText 10%);
+    color: inherit;*/
+    font: 12px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    padding: 6px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.zd-enh-toolbar-toggle:hover {
+    /*background: color-mix(in srgb, Canvas 84%, CanvasText 16%);*/
+}
+
+/* Thread attachments (unchanged from earlier styling) */
+.zd_v2-threadattachments-attachment {
+    /*background: color-mix(in srgb, Canvas 96%, CanvasText 4%);*/
+    border-radius: 12px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .10);
+    padding: 6px 10px;
+    margin: 10px 0;
+}
+
+.zd_v2-threadattachments-attachment .zd_v2-attachment-attachment {
+    /*background: color-mix(in srgb, Canvas 95%, CanvasText 5%) !important;*/
+    /* neutral, not yellow */
+    /*border: 1px solid color-mix(in srgb, CanvasText 22%, transparent) !important;*/
+    /* subtle neutral */
+    border-left-width: 4px !important;
+    border-radius: 10px !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, .12);
+    padding: 6px 8px;
+    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+
+.zd_v2-threadattachments-attachment .zd_v2-attachment-attachment:hover,
+.zd_v2-threadattachments-attachment .zd_v2-attachment-attachment.zd_v2-attachment-attachmentHover:hover {
+    /*background: color-mix(in srgb, Canvas 92%, CanvasText 8%) !important;*/
+    /* a drop darker on hover */
+    /*border-color: color-mix(in srgb, CanvasText 30%, transparent) !important;*/
+    box-shadow: 0 3px 8px rgba(0, 0, 0, .14);
+}
+
+.zd_v2-threadattachments-attachment .zd_v2-attachment-atatchName {
+    font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+    .KB_Editor_iframe {
+        color: CanvasText;
+    }
+}

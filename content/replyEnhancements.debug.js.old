@@ -1,0 +1,328 @@
+// replyEnhancements.inline.v4.js
+(() => {
+    const NS = '[zd-enh]';
+    const DBG = { on: true };
+    const log = (...a) => { if (DBG.on) console.log(NS, ...a); };
+    const debounce = (fn, ms = 120) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+    const norm = s => String(s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+
+    const SEL = {
+        outerEditor: '.KB_Editor',
+        iframe: '.KB_Editor_iframe'
+    };
+
+    // ---------- CSS (page) ----------
+    const TOPLEVEL_CSS = `
+    .zd-enh-composer-open{
+      max-width: calc(100% - 15px);
+      margin: 14px auto 26px auto;
+      padding: 10px 12px;
+      background: Canvas;
+      box-shadow: 0 10px 22px rgba(0,0,0,.16), 0 3px 8px rgba(0,0,0,.10);
+      border: none !important;
+      border-radius: 12px;
+    }
+    .zd_v2-replyeditor-detailwrapper,
+    .zd_v2-replyeditor-wrapper { height: 80% !important; }
+  
+    /* External toggle – toolbar row */
+    .zd-enh-toolbar-toggle{
+      display:inline-flex; align-items:center; gap:.45rem;
+      padding:6px 10px; border-radius:8px;
+      background:Canvas; color:CanvasText;
+      border:1px dashed rgba(0,0,0,.28);
+      font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      cursor:pointer; user-select:none;
+    }
+    .zd-enh-toolbar-toggle .hint{ opacity:.65; font-size:11px; }
+  
+    /* Fallback sticky holder when footer row can't be found */
+    .zd-enh-sticky-holder{
+      position: sticky; bottom: 8px; left: 8px;
+      align-self:flex-start; z-index: 9;
+      margin-top: 8px;
+    }
+    `;
+
+    // ---------- CSS (iframe) ----------
+    const IFRAME_CSS = `
+    [data-zd-q-hide="1"]{ display:none !important; }
+    `;
+
+    function injectCSS(doc, id, css) {
+        if (!doc || !doc.documentElement) return;
+        if (doc.getElementById(id)) return;
+        const s = doc.createElement('style');
+        s.id = id; s.textContent = css;
+        (doc.head || doc.documentElement).appendChild(s);
+    }
+
+    // ---------- Header normalization ----------
+    const DASH = '[-\\u2013\\u2014]{2,}';
+    const RE_ZOHO_DASHED_BLOCK =
+        new RegExp(`${DASH}\\s*on\\s+([\\s\\S]*?)\\s*wrote\\s*${DASH}\\s*:?\\s*$`, 'i');
+
+    function normalizeDashedHeadersBlockwise(root) {
+        let normalized = 0;
+        const blocks = root.querySelectorAll('div,p,blockquote,li,section,article,span');
+        const MAX = 400;
+        for (let i = 0; i < blocks.length && i < MAX; i++) {
+            const el = blocks[i];
+            const t = el.innerText;
+            if (!t) continue;
+            const m = t.match(RE_ZOHO_DASHED_BLOCK);
+            if (m) {
+                const inner = norm(m[1]);
+                const repl = `On ${inner} wrote:`;
+                if (t.trim() !== repl) { el.textContent = repl; normalized++; }
+            }
+        }
+        return { normalized };
+    }
+
+    // ---------- Quote anchor & hide/show ----------
+    function attrStr(el) {
+        return (el.getAttribute('title') || el.getAttribute('data-title') || '').toLowerCase();
+    }
+    function looksLikeSignEnd(el) {
+        const s = attrStr(el).replace(/\s+/g, '').replace(/:+/g, '::');
+        return s.includes('sign_holder::end');
+    }
+    function toTopChild(root, el) {
+        let cur = el;
+        while (cur && cur.parentNode !== root) cur = cur.parentNode;
+        return cur || el || root.firstElementChild || root;
+    }
+    function findSignEnd(root) {
+        const cand = root.querySelectorAll('[title],[data-title]');
+        for (const el of cand) if (looksLikeSignEnd(el)) return toTopChild(root, el);
+        return null;
+    }
+    const RE_HEADER_TAIL = /\bon\s+.+\s+wrote:?\s*$/i;
+    function findHeaderBlock(root) {
+        const blocks = root.querySelectorAll('div,p,blockquote,span,li');
+        const MAX = 250;
+        for (let i = 0; i < blocks.length && i < MAX; i++) {
+            const el = blocks[i];
+            const txt = norm(el.innerText || el.textContent || '');
+            if (!txt) continue;
+            if (RE_HEADER_TAIL.test(txt)) return toTopChild(root, el);
+            if (RE_ZOHO_DASHED_BLOCK.test(txt)) return toTopChild(root, el);
+        }
+        return null;
+    }
+    function setHiddenAfter(root, anchor, hidden) {
+        if (!anchor) return { hiddenCount: 0 };
+        let hiddenCount = 0;
+        for (let sib = anchor.nextSibling; sib; sib = sib.nextSibling) {
+            if (sib.nodeType === 1) {
+                if (hidden) { sib.setAttribute('data-zd-q-hide', '1'); hiddenCount++; }
+                else { sib.removeAttribute('data-zd-q-hide'); }
+            }
+        }
+        return { hiddenCount };
+    }
+
+    // ---------- Composer polish ----------
+    function elevateComposer(outer) {
+        const shell =
+            outer.closest('.zd_v2-replyeditor-detailwrapper') ||
+            outer.closest('.zd_v2-replyeditor-wrapper') ||
+            outer.parentElement || document.body;
+        if (shell) shell.classList.add('zd-enh-composer-open');
+        return shell;
+    }
+
+    // ---------- Footer/Action row detection (to place external toggle) ----------
+    function findFooterRow(shell) {
+        if (!shell) return null;
+
+        // 1) Prefer a row that has Send/Cancel/Discard buttons
+        const candidates = Array.from(shell.querySelectorAll('button,[role="button"],.zdr_button_tag,a'));
+        const matches = candidates.filter(el => {
+            const txt = norm(el.textContent || '').toLowerCase();
+            const id = (el.getAttribute('data-test-id') || '').toLowerCase();
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            return /(send|cancel|discard)/.test(txt) || /(send|cancel|discard)/.test(id) || /(send|cancel|discard)/.test(aria);
+        });
+
+        // Try to find a common parent row that contains >=2 buttons
+        for (const el of matches) {
+            let r = el;
+            for (let up = 0; up < 5 && r && r !== shell; up++) { // walk up a few levels
+                const buttonsInRow = r.querySelectorAll('button,[role="button"],.zdr_button_tag,a');
+                if (buttonsInRow.length >= 2) return r;
+                r = r.parentElement;
+            }
+        }
+
+        // 2) Fallback: last row-like container near the editor
+        const rows = shell.querySelectorAll('[data-test-id="boxComponent"],[data-selector-id="box"],div,section,footer');
+        let lastRow = null;
+        rows.forEach(n => {
+            const style = window.getComputedStyle(n);
+            if ((style.display === 'flex' || style.display === 'grid') && n.querySelector('button,[role="button"],.zdr_button_tag,a')) {
+                lastRow = n;
+            }
+        });
+        return lastRow;
+    }
+
+    function ensureToolbarToggle(shell, getState, onToggle) {
+        if (!shell) return null;
+
+        // Try footer row first
+        let row = findFooterRow(shell);
+
+        // Create a holder (inline if row found; sticky fallback otherwise)
+        let holder = shell.querySelector('.zd-enh-toolbar-holder');
+        if (!holder) {
+            holder = document.createElement('div');
+            holder.className = 'zd-enh-toolbar-holder';
+            if (row) {
+                // Put on the left of the footer row
+                row.insertBefore(holder, row.firstChild);
+            } else {
+                // Fallback: sticky at bottom-left within the composer shell
+                const sticky = document.createElement('div');
+                sticky.className = 'zd-enh-sticky-holder';
+                sticky.appendChild(holder);
+                shell.appendChild(sticky);
+            }
+        }
+
+        let btn = holder.querySelector('.zd-enh-toolbar-toggle');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'zd-enh-toolbar-toggle';
+            holder.appendChild(btn);
+            btn.addEventListener('click', () => {
+                const st = getState();
+                onToggle(!st.hidden);
+            });
+        }
+
+        const st = getState();
+        btn.innerHTML = st.hidden
+            ? `Show quoted text <span class="hint">(hidden ${st.hiddenCount})</span>`
+            : `Hide quoted text <span class="hint">(shown)</span>`;
+
+        return btn;
+    }
+
+    // ---------- Iframe wiring ----------
+    const wired = new WeakSet();
+
+    function wireOne(outer) {
+        if (!outer || wired.has(outer)) return;
+        wired.add(outer);
+
+        injectCSS(document, 'zd-enh-style-top', TOPLEVEL_CSS);
+        const shell = elevateComposer(outer);
+
+        const iframe =
+            outer.parentElement?.querySelector(SEL.iframe) ||
+            outer.closest('.zd_v2-replyeditor-detailwrapper, .zd_v2-replyeditor-wrapper')?.querySelector(SEL.iframe) ||
+            document.querySelector(SEL.iframe);
+
+        if (!iframe) { log('no iframe for editor'); return; }
+
+        const onReady = () => {
+            const doc = iframe.contentDocument; const body = doc?.body;
+            if (!doc || !body) { log('iframe not ready'); return; }
+
+            injectCSS(doc, 'zd-enh-style-iframe', IFRAME_CSS);
+
+            // Normalize headers
+            const hdr = normalizeDashedHeadersBlockwise(body);
+
+            // Compute anchor and default hide
+            let anchor = findSignEnd(body) || findHeaderBlock(body);
+            const hiddenDefault = true;
+            const r0 = setHiddenAfter(body, anchor, hiddenDefault);
+
+            // Per-editor state on the OUTER, so it survives iframe DOM churn
+            const state = {
+                hidden: hiddenDefault,
+                hiddenCount: r0.hiddenCount,
+                normalizedCount: hdr.normalized
+            };
+            outer.dataset.zdHidden = state.hidden ? '1' : '0';
+
+            function getState() { return { ...state }; }
+            function applyHidden(nextHidden) {
+                // Re-evaluate anchor in case content changed
+                anchor = findSignEnd(body) || findHeaderBlock(body) || anchor;
+                const r = setHiddenAfter(body, anchor, nextHidden);
+                state.hidden = nextHidden;
+                state.hiddenCount = r.hiddenCount;
+                outer.dataset.zdHidden = state.hidden ? '1' : '0';
+                // Refresh external button text
+                ensureToolbarToggle(shell, getState, applyHidden);
+                return r;
+            }
+
+            // External toolbar toggle (NOT in the iframe)
+            ensureToolbarToggle(shell, getState, applyHidden);
+
+            // Keep things in sync on DOM updates inside the iframe
+            const reapply = debounce(() => {
+                const hdr2 = normalizeDashedHeadersBlockwise(body);
+                state.normalizedCount += hdr2.normalized;
+                anchor = findSignEnd(body) || findHeaderBlock(body) || anchor;
+                const r = setHiddenAfter(body, anchor, state.hidden);
+                state.hiddenCount = r.hiddenCount;
+                ensureToolbarToggle(shell, getState, applyHidden);
+                log('reapplied', { normalizedAdded: hdr2.normalized, hiddenCount: r.hiddenCount });
+            }, 120);
+
+            const mo = new MutationObserver(() => reapply());
+            mo.observe(body, { childList: true, subtree: true, characterData: true });
+
+            log('wired editor', { hiddenDefault, hiddenCount: state.hiddenCount, normalized: state.normalizedCount });
+        };
+
+        if (iframe.contentDocument?.readyState === 'complete' || iframe.contentDocument?.readyState === 'interactive') {
+            onReady();
+        } else {
+            iframe.addEventListener('load', onReady, { once: true });
+        }
+    }
+
+    function scanAll() {
+        const list = document.querySelectorAll(SEL.outerEditor);
+        log('scanAll editors:', list.length);
+        list.forEach(wireOne);
+    }
+
+    // ---------- Public debug helpers ----------
+    window.zdEnh = {
+        enableDebug(on = true) { DBG.on = !!on; console.log(NS, 'debug', on ? 'ON' : 'OFF'); },
+        rescan() { scanAll(); },
+        report() {
+            const iframe = document.querySelector(SEL.iframe);
+            const doc = iframe?.contentDocument; const body = doc?.body;
+            if (!body) { console.log(NS, 'report: no iframe/body'); return; }
+            const z1 = normalizeDashedHeadersBlockwise(body);
+            const hasSign = !!findSignEnd(body);
+            const hasHdr = !!findHeaderBlock(body);
+            const shell =
+                document.querySelector('.zd_v2-replyeditor-detailwrapper') ||
+                document.querySelector('.zd_v2-replyeditor-wrapper');
+            const footer = shell && !!findFooterRow(shell);
+            const sample = (body.innerText || '').split('\n').slice(0, 15);
+            console.log(NS, 'report:', { normalizedNow: z1.normalized, hasSign, hasHeaderLikeBlock: hasHdr, footerRowFound: footer, sample });
+        }
+    };
+
+    // ---------- Boot ----------
+    function boot() {
+        injectCSS(document, 'zd-enh-style-top', TOPLEVEL_CSS);
+        scanAll();
+        const mo = new MutationObserver(debounce(scanAll, 150));
+        mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+    else boot();
+})();
