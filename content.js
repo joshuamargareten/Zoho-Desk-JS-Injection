@@ -188,7 +188,7 @@
         ui?.close();
       } else if (msg.type === 'zd-viewer-request-open-new-tab') {
         const u = new URL(msg.src, location.href);
-        if (!u.searchParams.has('inline')) u.searchParams.set('inline', 'true');
+        //if (!u.searchParams.has('inline')) u.searchParams.set('inline', 'true');
         // NOTE: no "disposition" param per request
         window.open(u.toString(), "_blank", "noopener");
       } else if (msg.type === 'zd-viewer-request-direct-download') {
