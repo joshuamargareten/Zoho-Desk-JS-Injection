@@ -4,7 +4,12 @@
   "version": "1.9.0",
   "description": "Composer formatting + robust attachment viewer for Zoho Desk.",
   "permissions": [],
-  "host_permissions": ["*://desk.theteklink.com/*", "*://*.zohodesk.com/*"],
+  "host_permissions": [
+    "*://desk.theteklink.com/*",
+    "*://*.zohodesk.com/*",
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*"
+  ],
   "content_scripts": [
     {
       "matches": ["*://desk.theteklink.com/*", "*://*.zohodesk.com/*"],

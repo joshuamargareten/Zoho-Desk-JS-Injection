@@ -9,6 +9,67 @@
     const VIEWER_BASE = qs.get('viewer_base')
         || (location.origin + '/viewer.html');
 
+    // Zoho Office Integrator relay (Google Apps Script). You can override with ?zoi_relay=...
+    const ZOI_RELAY = qs.get('zoi_relay')
+        || 'https://script.google.com/a/macros/theteklink.com/s/AKfycbzlWTWa4eE7FQDtRSRm0CZ9U8sH-rmfQ7PqlWyCFLY0NDfPYO1VQBQvbKANnb-W2fcuVw/exec';
+
+    // Map extensions → which OI app to use (informational; actual routing uses sets below)
+    const ZOI_APP_BY_EXT = Object.freeze({
+        // Writer
+        doc: 'writer', docx: 'writer', docm: 'writer',
+        dot: 'writer', dotx: 'writer', dotm: 'writer',
+        rtf: 'writer', odt: 'writer', sxw: 'writer',
+        html: 'writer', htm: 'writer', tex: 'writer', md: 'writer',
+        // Sheet
+        xlsx: 'sheet', xlsm: 'sheet', xlsb: 'sheet', xls: 'sheet',
+        csv: 'sheet', tsv: 'sheet', xltx: 'sheet', xltm: 'sheet',
+        xlt: 'sheet', xlam: 'sheet', xla: 'sheet', ods: 'sheet', sxc: 'sheet', txt: 'sheet',
+        // Show
+        pptx: 'show', pptm: 'show', ppt: 'show',
+        ppsx: 'show', ppsm: 'show', pps: 'show',
+        potx: 'show', potm: 'show', pot: 'show',
+        odp: 'show', thmx: 'show', xps: 'show', ppa: 'show', ppam: 'show'
+    });
+
+    // -------- ZOI caching (avoid re-spending credits) --------
+    const ZOI_CACHE_NS = 'zoi_cache_v1';
+    const ZOI_CACHE_TTL = 12 * 60 * 60 * 1000; // 12h
+
+    function normalizeForKey(s) {
+        try {
+            const u = new URL(s, location.href);
+            u.searchParams.delete('__ts');
+            u.searchParams.delete('inline');
+            return u.toString();
+        } catch { return s || ''; }
+    }
+    function zoiHash(s) { let x = 0; for (let i = 0; i < s.length; i++) x = (x * 31 + s.charCodeAt(i)) | 0; return (x >>> 0).toString(16); }
+    function zoiCacheKey(app, name, src) { return `${app}:${(name || '').slice(0, 120)}:${zoiHash(normalizeForKey(src || ''))}`; }
+
+    function zoiCacheGet(key) {
+        try {
+            const all = JSON.parse(localStorage.getItem(ZOI_CACHE_NS) || '{}');
+            const rec = all[key];
+            if (!rec) return null;
+            if (Date.now() - rec.t > ZOI_CACHE_TTL) {
+                delete all[key];
+                localStorage.setItem(ZOI_CACHE_NS, JSON.stringify(all));
+                return null;
+            }
+            return rec;
+        } catch { return null; }
+    }
+    function zoiCacheSet(key, val) {
+        try {
+            const all = JSON.parse(localStorage.getItem(ZOI_CACHE_NS) || '{}');
+            all[key] = { ...val, t: Date.now() };
+            localStorage.setItem(ZOI_CACHE_NS, JSON.stringify(all));
+        } catch {}
+    }
+
+    // One-time consent guard (don’t keep opening tabs)
+    let ZOI_AUTH_PROMPTED = false;
+
     // Optional deep-open into a ZIP from a new tab: ?zip=<archiveURL>&entry=<path/in/zip>
     const BOOT_ZIP_URL = qs.get('zip') || '';
     const BOOT_ZIP_ENTRY = qs.get('entry') || '';
@@ -165,6 +226,17 @@
         try { const s = new TextDecoder('ascii').decode(buf.slice(0, 5)); return s === '%PDF-'; } catch { return false; }
     }
 
+    // Convert ArrayBuffer → base64 (chunked, safe for big files)
+    function abToBase64(ab) {
+        const CHUNK = 0x8000;
+        const bytes = new Uint8Array(ab);
+        let out = '';
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+        return btoa(out);
+    }
+
     // --- ZIP preview helpers ---
     function mimeFromExt(name) {
         const ext = (name.split('.').pop() || '').toLowerCase();
@@ -195,6 +267,163 @@
                 return 'application/octet-stream';
             default: return 'application/octet-stream';
         }
+    }
+
+    // ---- ZOI helpers ----
+    function getZoiAppForExt(ext) {
+        if (DOC_TYPES.has(ext)) return 'writer';
+        if (SHEET_TYPES.has(ext)) return 'sheet';
+        if (PPT_TYPES.has(ext)) return 'show';
+        return null;
+    }
+
+    // Try inline preview via Zoho Office Integrator (uses Apps Script relay). Returns true if used.
+    async function tryZohoOffice(src, name, ext) {
+        if (!nav.embedded) return false;        // only in embedded mode (proxyFetch for private URLs)
+        const app = getZoiAppForExt(ext);
+        if (!app) return false;
+
+        // Cache hit? Embed directly.
+        const key = zoiCacheKey(app, name || '', src || '');
+        const cached = zoiCacheGet(key);
+        if (cached && cached.openUrl) {
+            clearStage();
+            const host = document.createElement('div'); host.className = 'doc-edge';
+            const f = document.createElement('iframe'); f.className = 'doc-frame';
+            f.src = cached.openUrl;
+            host.appendChild(f); stage.appendChild(host);
+            if (nav.embedded) clickCloseOn(host);
+            return true;
+        }
+
+        // Fetch bytes
+        let ab;
+        try {
+            const { buf } = await proxyFetch(src);
+            ab = buf;
+        } catch {
+            return false;
+        }
+
+        // POST to relay
+        let resp, ct, text, json;
+        try {
+            const body = {
+                app,
+                dataBase64: abToBase64(ab),
+                name: name || ('file.' + (ext || 'bin')),
+                language: 'en',
+            };
+            if (app === 'sheet') body.permissions = { "document.export": true, "document.print": true };
+            if (app === 'show') body.document_info = { document_name: name || 'Untitled', document_id: (name || 'doc').replace(/[^\w\-.]+/g, '_').slice(0, 64) };
+
+            resp = await fetch(ZOI_RELAY, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+                cache: 'no-cache',
+                credentials: 'include'
+            });
+            ct = (resp.headers.get('content-type') || '').toLowerCase();
+            text = await resp.text();
+            if (ct.includes('application/json')) json = JSON.parse(text);
+        } catch (e) {
+            showError('ZOI relay error: ' + (e.message || e));
+            return false;
+        }
+
+        // If not JSON or missing openUrl → likely needs consent
+        if (!json || !json.openUrl) {
+            if (!ZOI_AUTH_PROMPTED) {
+                ZOI_AUTH_PROMPTED = true;
+                const authUrl = ZOI_RELAY; // open the web app itself; user consents, then refresh
+                if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: authUrl, name: 'Authorize Zoho Office Relay' }, '*');
+                else window.open(authUrl, '_blank', 'noopener');
+                showError('Please authorize the relay in the new tab, then return and click Refresh.');
+            }
+            return false;
+        }
+
+        // Cache + embed
+        zoiCacheSet(key, { openUrl: json.openUrl });
+        clearStage();
+        const host = document.createElement('div'); host.className = 'doc-edge';
+        const f = document.createElement('iframe'); f.className = 'doc-frame';
+        f.src = json.openUrl;
+        host.appendChild(f); stage.appendChild(host);
+        if (nav.embedded) clickCloseOn(host);
+        return true;
+    }
+
+    // Open via ZOI using a URL source (for "Open" button). Uses cache when available.
+    async function openWithZOI(app, name, src) {
+        const key = zoiCacheKey(app, name || '', src || '');
+        const cached = zoiCacheGet(key);
+        if (cached && cached.openUrl) {
+            const url = cached.openUrl;
+            if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: url, name }, '*');
+            else window.open(url, '_blank', 'noopener');
+            return true;
+        }
+
+        // fetch file bytes
+        let buf;
+        try {
+            if (nav.embedded) { const r = await proxyFetch(src); buf = r.buf; }
+            else { const r = await fetch(src, { credentials: 'include', cache: 'reload' }); buf = await r.arrayBuffer(); }
+        } catch (e) {
+            showError('Could not fetch file for ZOI: ' + (e.message || e));
+            return false;
+        }
+
+        return await openWithZOIFromBuffer(app, name, buf, key);
+    }
+
+    // Open via ZOI when we already have bytes (ZIP entry)
+    async function openWithZOIFromBuffer(app, name, ab, cacheKey) {
+        let resp, ct, text, json;
+        try {
+            const body = JSON.stringify({
+                app,
+                dataBase64: abToBase64(ab),
+                name,
+                language: 'en',
+                permissions: app === 'sheet' ? { "document.export": true, "document.print": true } : undefined,
+                document_info: app === 'show' ? { document_name: name || 'Untitled', document_id: (name || 'doc').replace(/[^\w\-.]+/g, '_').slice(0, 64) } : undefined
+            });
+            resp = await fetch(ZOI_RELAY, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body,
+                cache: 'no-cache',
+                credentials: 'include'
+            });
+            ct = (resp.headers.get('content-type') || '').toLowerCase();
+            text = await resp.text();
+            if (ct.includes('application/json')) json = JSON.parse(text);
+        } catch (e) {
+            showError('ZOI relay error: ' + (e.message || e));
+            return false;
+        }
+
+        // If not JSON or missing openUrl → needs consent
+        if (!json || !json.openUrl) {
+            if (!ZOI_AUTH_PROMPTED) {
+                ZOI_AUTH_PROMPTED = true;
+                const authUrl = ZOI_RELAY;
+                if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: authUrl, name: 'Authorize Zoho Office Relay' }, '*');
+                else window.open(authUrl, '_blank', 'noopener');
+                showError('Please authorize the relay in the new tab, then return and click Refresh.');
+            }
+            return false;
+        }
+
+        if (cacheKey) zoiCacheSet(cacheKey, { openUrl: json.openUrl });
+
+        const url = json.openUrl;
+        if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: url, name }, '*');
+        else window.open(url, '_blank', 'noopener');
+        return true;
     }
 
     // ---- Renderers ----
@@ -716,29 +945,53 @@
         const ext = extOf(name || src);
         if (isSecurityBlocked(name || src)) return showBlocked();
 
+        // markdown / json / text (keep local)
         if (ext === 'md' || ext === 'markdown') return renderMarkdown(src);
         if (ext === 'json') return renderJSON(src);
         if (['txt', 'cfg', 'ini', 'conf', 'log', 'css', 'yaml', 'yml'].includes(ext)) return renderTextLike(src);
 
+        // vector / raster (keep local)
         if (ext === 'svg') return renderSVG(src);
         if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)) return renderImage(src);
 
+        // media (keep local)
         if (['mp4', 'webm', 'ogg', 'ogv', 'mov', 'm4v'].includes(ext)) return renderVideo(src);
         if (['mp3', 'wav', 'm4a', 'aac', 'flac'].includes(ext)) return renderAudio(src);
 
+        // pdf (keep your existing path)
         if (ext === 'pdf') return renderPDF(src);
 
+        // docs → try Zoho OI, then fallback to your current handlers
         if (DOC_TYPES.has(ext)) {
-            if (ext === 'rtf') return renderRTF(src);
-            if (ext === 'odt') return renderODT(src);
-            if (ext === 'doc' || ext === 'dot') return renderDOC_Fallback(src);
-            return renderDOCX_like(src);
+            (async () => {
+                if (await tryZohoOffice(src, name, ext)) return;
+                if (ext === 'rtf') return renderRTF(src);
+                if (ext === 'odt') return renderODT(src);
+                if (ext === 'doc' || ext === 'dot') return renderDOC_Fallback(src);
+                return renderDOCX_like(src);
+            })();
+            return;
         }
 
-        if (SHEET_TYPES.has(ext)) return renderSheet(src);
+        // sheets → try Zoho OI, then fallback
+        if (SHEET_TYPES.has(ext)) {
+            (async () => {
+                if (await tryZohoOffice(src, name, ext)) return;
+                return renderSheet(src);
+            })();
+            return;
+        }
 
-        if (PPT_TYPES.has(ext)) return renderPPT_like(src, ext);
+        // presentations → try Zoho OI, then fallback
+        if (PPT_TYPES.has(ext)) {
+            (async () => {
+                if (await tryZohoOffice(src, name, ext)) return;
+                return renderPPT_like(src, ext);
+            })();
+            return;
+        }
 
+        // archives (keep local)
         if (['zip', '7z', 'rar', 'gz', 'tar'].includes(ext)) return renderZIP(src);
 
         return showNoPreview();
@@ -773,48 +1026,52 @@
     });
 
     btnOpen.addEventListener('click', async () => {
-        // ZIP sub-view: keep existing behavior (open our viewer with ?zip=...&entry=...)
+        // ZIP sub-view first
         if (inZipNav()) {
             const entry = activeZipEntry();
             if (!entry) return;
-            const viewerUrl = buildViewerUrl({
-                zip: zipNav.parentSrc,
-                entry: entry.name,
-                name: entry.name
-            });
-            if (nav.embedded) {
-                parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: viewerUrl, name: entry.name }, '*');
-            } else {
-                window.open(viewerUrl, "_blank", "noopener");
+
+            const ext = (entry.name.split('.').pop() || '').toLowerCase();
+            const app = getZoiAppForExt(ext);
+
+            // Prefer ZOI for supported types inside ZIP
+            if (app) {
+                try {
+                    const ab = await entry.async('arraybuffer');
+                    const ok = await openWithZOIFromBuffer(app, entry.name, ab /* no cache for ZIP by default */);
+                    if (ok) return;
+                } catch {}
             }
+
+            // Fallback: open our viewer for that entry (your current behavior)
+            const viewerUrl = buildViewerUrl({ zip: zipNav.parentSrc, entry: entry.name, name: entry.name });
+            if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: viewerUrl, name: entry.name }, '*');
+            else window.open(viewerUrl, "_blank", "noopener");
             return;
         }
 
-        // Top-level file: if it's a PDF, open ORIGINAL URL (fixes CORS)
-        const isPdf = (function () {
-            // extOf already exists in your file
-            try { return extOf(current.name || current.src) === 'pdf'; } catch { return false; }
-        })();
-
-        if (isPdf) {
-            const original = withInline(current.src); // add ?inline=true if not present
-            if (nav.embedded) {
-                parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: original, name: current.name }, '*');
-            } else {
-                window.open(original, "_blank", "noopener");
-            }
+        // Top-level file
+        const ext = (current.name || current.src || '').split('.').pop().toLowerCase();
+        if (ext === 'pdf') {
+            // your PDF rule: open original URL
+            const original = withInline(current.src);
+            if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: original, name: current.name }, '*');
+            else window.open(original, "_blank", "noopener");
             return;
         }
 
-        // Everything else: keep opening the extension viewer as before
+        // Try ZOI for Writer/Sheet/Show types
+        const app = getZoiAppForExt(ext);
+        if (app) {
+            const ok = await openWithZOI(app, current.name, current.src);
+            if (ok) return;
+        }
+
+        // Fallback to your viewer
         const viewerUrl = buildViewerUrl({ url: withInline(current.src), name: current.name });
-        if (nav.embedded) {
-            parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: viewerUrl, name: current.name }, '*');
-        } else {
-            window.open(viewerUrl, "_blank", "noopener");
-        }
+        if (nav.embedded) parent.postMessage({ type: 'zd-viewer-request-open-new-tab', src: viewerUrl, name: current.name }, '*');
+        else window.open(viewerUrl, "_blank", "noopener");
     });
-
 
     btnDownload.addEventListener('click', async () => {
         if (inZipNav()) {
