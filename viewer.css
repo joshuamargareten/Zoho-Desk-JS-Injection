@@ -281,8 +281,14 @@ pre.code {
     padding: 6px 10px
 }
 
-.btn:disabled, .btn:disabled:hover {
+.btn:disabled,
+.btn:disabled:hover {
     color: rgba(17, 17, 17, 0.5);
     cursor: default;
     background: var(--btn-bg);
+}
+
+.btn.disabled {
+    opacity: .5;
+    pointer-events: none;
 }

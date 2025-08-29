@@ -64,7 +64,7 @@
             const all = JSON.parse(localStorage.getItem(ZOI_CACHE_NS) || '{}');
             all[key] = { ...val, t: Date.now() };
             localStorage.setItem(ZOI_CACHE_NS, JSON.stringify(all));
-        } catch {}
+        } catch { }
     }
 
     // One-time consent guard (don’t keep opening tabs)
@@ -93,6 +93,55 @@
     const titleEl = document.getElementById('title');
 
     const uid = () => Math.random().toString(36).slice(2);
+
+    // ===== Busy / spinner UI and async task guard =====
+    let __taskSeq = 0;                       // increments per render
+    const nextTask = () => (++__taskSeq);    // return a new task id
+    const isTaskActive = (t) => t === __taskSeq;
+
+    function setButtonsDisabled(disabled) {
+        [btnPrev, btnNext, btnOpen, btnDownload, btnRefresh].forEach(b => {
+            if (!b) return;
+            b.disabled = !!disabled;
+            b.classList.toggle('disabled', !!disabled);
+        });
+    }
+
+    // inject tiny spinner style once
+    (function injectLoadingCSS() {
+        if (document.getElementById('__zdLoadingCSS')) return;
+        const s = document.createElement('style');
+        s.id = '__zdLoadingCSS';
+        s.textContent = `
+    .zd-loading { display:flex; align-items:center; justify-content:center; min-height:60vh; }
+    .zd-loading .box { display:flex; gap:12px; align-items:center; font-size:14px; color:var(--text); }
+    .zd-loading .spin { width:18px; height:18px; border:3px solid var(--border); border-top-color: var(--text);
+        border-radius:50%; animation:zdspin 0.9s linear infinite;}
+    @keyframes zdspin { to { transform:rotate(360deg); } }
+    `;
+        document.head.appendChild(s);
+    })();
+
+    let __loadingEl = null;
+    function showLoading(msg) {
+        clearStage();
+        const wrap = document.createElement('div'); wrap.className = 'pad';
+        const inner = document.createElement('div'); inner.className = 'pad-inner zd-loading';
+        const box = document.createElement('div'); box.className = 'box';
+        const spin = document.createElement('div'); spin.className = 'spin';
+        const text = document.createElement('div'); text.className = 'msg'; text.textContent = msg || 'Loading…';
+        box.appendChild(spin); box.appendChild(text); inner.appendChild(box); wrap.appendChild(inner); stage.appendChild(wrap);
+        __loadingEl = text;
+        setButtonsDisabled(true);
+    }
+    function updateLoading(msg) {
+        if (__loadingEl) __loadingEl.textContent = msg || 'Loading…';
+    }
+    function hideLoading() {
+        setButtonsDisabled(false);
+        __loadingEl = null; // stage gets redrawn by renderers
+    }
+
 
     // -------- Viewer URL builder (supports ?url=... OR ?zip=...&entry=...)
     function buildViewerUrl({ url, name, zip, entry }) {
@@ -278,7 +327,7 @@
     }
 
     // Try inline preview via Zoho Office Integrator (uses Apps Script relay). Returns true if used.
-    async function tryZohoOffice(src, name, ext) {
+    async function tryZohoOffice(src, name, ext, taskId) {
         if (!nav.embedded) return false;        // only in embedded mode (proxyFetch for private URLs)
         const app = getZoiAppForExt(ext);
         if (!app) return false;
@@ -296,27 +345,38 @@
             return true;
         }
 
-        // Fetch bytes
+        // 1) Download bytes
+        showLoading('Downloading…');
         let ab;
         try {
             const { buf } = await proxyFetch(src);
+            if (!isTaskActive(taskId)) return true; // user navigated away; do nothing
             ab = buf;
         } catch {
+            if (!isTaskActive(taskId)) return true;
             return false;
         }
 
-        // POST to relay
+        // 2) Encode
+        updateLoading('Preparing…');
+        const dataBase64 = abToBase64(ab);
+        if (!isTaskActive(taskId)) return true;
+
+        // 3) Build relay payload
         let resp, ct, text, json;
         try {
             const body = {
                 app,
-                dataBase64: abToBase64(ab),
+                dataBase64,
                 name: name || ('file.' + (ext || 'bin')),
                 language: 'en',
+                lang: 'en',
             };
             if (app === 'sheet') body.permissions = { "document.export": true, "document.print": true };
             if (app === 'show') body.document_info = { document_name: name || 'Untitled', document_id: (name || 'doc').replace(/[^\w\-.]+/g, '_').slice(0, 64) };
 
+            // 4) Call Apps Script relay
+            updateLoading('Uploading to Zoho…');
             resp = await fetch(ZOI_RELAY, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
@@ -328,11 +388,12 @@
             text = await resp.text();
             if (ct.includes('application/json')) json = JSON.parse(text);
         } catch (e) {
+            if (!isTaskActive(taskId)) return true;
             showError('ZOI relay error: ' + (e.message || e));
             return false;
         }
 
-        // If not JSON or missing openUrl → likely needs consent
+        // 5) If first-time auth page showed up (HTML/redirect), prompt user
         if (!json || !json.openUrl) {
             if (!ZOI_AUTH_PROMPTED) {
                 ZOI_AUTH_PROMPTED = true;
@@ -346,12 +407,14 @@
 
         // Cache + embed
         zoiCacheSet(key, { openUrl: json.openUrl });
+        if (!isTaskActive(taskId)) return true;
         clearStage();
         const host = document.createElement('div'); host.className = 'doc-edge';
         const f = document.createElement('iframe'); f.className = 'doc-frame';
         f.src = json.openUrl;
         host.appendChild(f); stage.appendChild(host);
         if (nav.embedded) clickCloseOn(host);
+        hideLoading();
         return true;
     }
 
@@ -719,7 +782,8 @@
             current = { src: url, name: entry.name };
             setTitle(); setCounter(); setNavVisible();
 
-            renderByType(url, entry.name);
+            const taskId = nextTask();
+            renderByType(url, entry.name, taskId);
 
             setTimeout(() => {
                 const overlay = document.createElement('div');
@@ -941,7 +1005,7 @@
     const SHEET_TYPES = new Set(['xlsx', 'xlsm', 'xlsb', 'xls', 'csv', 'tsv', 'xltx', 'xltm', 'xlt', 'xlam', 'xla', 'ods']);
     const PPT_TYPES = new Set(['pptx', 'pptm', 'ppt', 'xps', 'potx', 'potm', 'pot', 'thmx', 'ppsx', 'ppsm', 'pps', 'ppam', 'ppa', 'odp']);
 
-    function renderByType(src, name) {
+    function renderByType(src, name, taskId) {
         const ext = extOf(name || src);
         if (isSecurityBlocked(name || src)) return showBlocked();
 
@@ -964,7 +1028,8 @@
         // docs → try Zoho OI, then fallback to your current handlers
         if (DOC_TYPES.has(ext)) {
             (async () => {
-                if (await tryZohoOffice(src, name, ext)) return;
+                if (await tryZohoOffice(src, name, ext, taskId)) return;
+                hideLoading();
                 if (ext === 'rtf') return renderRTF(src);
                 if (ext === 'odt') return renderODT(src);
                 if (ext === 'doc' || ext === 'dot') return renderDOC_Fallback(src);
@@ -976,7 +1041,8 @@
         // sheets → try Zoho OI, then fallback
         if (SHEET_TYPES.has(ext)) {
             (async () => {
-                if (await tryZohoOffice(src, name, ext)) return;
+                if (await tryZohoOffice(src, name, ext, taskId)) return;
+                hideLoading();
                 return renderSheet(src);
             })();
             return;
@@ -985,7 +1051,8 @@
         // presentations → try Zoho OI, then fallback
         if (PPT_TYPES.has(ext)) {
             (async () => {
-                if (await tryZohoOffice(src, name, ext)) return;
+                if (await tryZohoOffice(src, name, ext, taskId)) return;
+                hideLoading();
                 return renderPPT_like(src, ext);
             })();
             return;
@@ -998,10 +1065,11 @@
     }
 
     function render(src, name) {
+        const taskId = nextTask();
         current = { src, name };
         setCounter(); setTitle(); setNavVisible();
         if (!src) { showError("No source URL."); return; }
-        renderByType(src, name);
+        renderByType(src, name, taskId);
     }
 
     // ---- UI wiring ----
@@ -1040,7 +1108,7 @@
                     const ab = await entry.async('arraybuffer');
                     const ok = await openWithZOIFromBuffer(app, entry.name, ab /* no cache for ZIP by default */);
                     if (ok) return;
-                } catch {}
+                } catch { }
             }
 
             // Fallback: open our viewer for that entry (your current behavior)

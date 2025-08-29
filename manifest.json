@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Teklink Zoho Desk Helper",
-  "version": "1.9.0",
+  "version": "1.10.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9XoF8I/yzdKnSPIW/k0YTyt63Vg/j7mkRFYaHgjIEEMeqOZ7EbsAmbt1EtDZuVWBEA0UWCFBSTuNNYoqioN81I1yCYHuALGtD29O9YKIlS9uPwU38DDWOchcvZnOV5jgxZKez0VIJbAcia7RfOVd29KWetbcQ3rushTSv/tq8M8aAd2uwjuHGDOLyg+StAUNcihnWv2du4dTW8Z8s4Z3Zq/QgdczGdsUripOjWrYLt0Fh8dvp7JmNlEkBZbQC+Lb/JYYObKI2CtpRnsHK+OpmNow88a4zY++05sLRxLxz0/V2jq69w2u7VdIHzKjSb+6BO410O5ft/mCsvA+haBuVQIDAQAB",
   "description": "Composer formatting + robust attachment viewer for Zoho Desk.",
   "permissions": [],
   "host_permissions": [
