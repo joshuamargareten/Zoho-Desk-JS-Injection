@@ -1,5 +1,8 @@
 // replyEnhancements.prod.v5.js
 (() => {
+    // Composers are wired from the top page; a copy inside Zoho's editor iframe has nothing to do.
+    if (window.top !== window) return;
+
     // ---------- small utils ----------
     const norm = s => String(s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -87,14 +90,9 @@
         const s = attrStr(el).replace(/\s+/g, '').replace(/:+/g, '::');
         return s.includes('sign_holder::end');
     }
-    function toTopChild(root, el) {
-        let cur = el;
-        while (cur && cur.parentNode !== root) cur = cur.parentNode;
-        return cur || el || root.firstElementChild || root;
-    }
     function findSignEnd(root) {
         const cand = root.querySelectorAll('[title],[data-title]');
-        for (const el of cand) if (looksLikeSignEnd(el)) return toTopChild(root, el);
+        for (const el of cand) if (looksLikeSignEnd(el)) return el;
         return null;
     }
     function findHeaderBlock(root) {
@@ -104,18 +102,21 @@
             const el = blocks[i];
             const txt = norm(el.innerText || el.textContent || '');
             if (!txt) continue;
-            if (RE_HEADER_TAIL.test(txt)) return toTopChild(root, el);
-            if (RE_ZOHO_DASHED_BLOCK.test(txt)) return toTopChild(root, el);
+            if (RE_HEADER_TAIL.test(txt)) return el;
+            if (RE_ZOHO_DASHED_BLOCK.test(txt)) return el;
         }
         return null;
     }
+    // Hide everything after the anchor in document order, at every nesting level. A reopened
+    // saved draft wraps the whole body (text + signature + quote) in one <div>, so hiding only
+    // the anchor's top-level siblings hid nothing there.
     function setHiddenAfter(root, anchor, hidden) {
-        if (!anchor) return { hiddenCount: 0 };
+        root.querySelectorAll('[data-zd-q-hide]').forEach(el => el.removeAttribute('data-zd-q-hide'));
+        if (!anchor || !hidden) return { hiddenCount: 0 };
         let hiddenCount = 0;
-        for (let sib = anchor.nextSibling; sib; sib = sib.nextSibling) {
-            if (sib.nodeType === 1) {
-                if (hidden) { sib.setAttribute('data-zd-q-hide', '1'); hiddenCount++; }
-                else { sib.removeAttribute('data-zd-q-hide'); }
+        for (let n = anchor; n && n !== root; n = n.parentNode) {
+            for (let sib = n.nextSibling; sib; sib = sib.nextSibling) {
+                if (sib.nodeType === 1) { sib.setAttribute('data-zd-q-hide', '1'); hiddenCount++; }
             }
         }
         return { hiddenCount };

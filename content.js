@@ -1,8 +1,19 @@
 (() => {
+  // The manifest injects into all frames (including Zoho's editor iframe). Everything here
+  // reaches into the editor iframes from the top page, so a second copy running inside an
+  // iframe would only double-handle keys.
+  if (window.top !== window) return;
+
   // ===== CONFIG =====
   const BRAND_COLOR = "#1b1464";
   const LINE_HEIGHT = 1.5;
+  const LETTER_SPACING = "0.5px";
   const EDITOR_IFRAME_SEL = 'iframe.KB_Editor_iframe[name="deskEditor_New"]';
+
+  // Composer roots and their buttons (Zoho data-id values, verified Nov 2026).
+  const COMPOSER_ROOT_SEL = '[data-id="commentBox"], .zd_v2-replyeditor-detailwrapper, .zd_v2-replyeditor-wrapper';
+  const SEND_BTN_SEL = '[data-id="ticketSubmit_replySendOption"], [data-id="saveButtonId"]';
+  const DISCARD_BTN_SEL = '[data-id="CancelBtn"], [data-id="clearButton"]';
 
   // ===== GLOBALS =====
   let CURRENT_OVERLAY = null;
@@ -22,142 +33,148 @@
   }
 
   // ===== UTILS =====
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const resUrl = (p) => chrome.runtime.getURL(p);
   const abs = (u) => { try { return new URL(u, location.href).toString(); } catch { return u; } };
   const isVisible = (el) => !!el && el.getBoundingClientRect().width > 0;
 
-  function getEditor() {
-    const f = document.querySelector(EDITOR_IFRAME_SEL);
-    if (!f) return { frame: null, idoc: null, iwin: null };
-    try { return { frame: f, idoc: f.contentDocument, iwin: f.contentWindow }; } catch { return { frame: f, idoc: null, iwin: null }; }
-  }
+  // ===== COMPOSER FORMATTING =====
+  // Brand formatting is applied on the first keystroke into an empty line, never on focus or
+  // when Zoho resets the editor. Writing into the editor after Zoho clears it (post-save or
+  // Cancel) makes Zoho think there is unsaved text ("You haven't saved the comment...").
+  const BLOCK_SEL = 'div,p,li,h1,h2,h3,h4,h5,h6,blockquote,td';
 
-  function findActionButton(labels) {
-    const nodes = Array.from(document.querySelectorAll('button,[role="button"],a[role="button"],a,div[role="button"]'));
-    const m = (el) => {
-      const t = (el.innerText || el.textContent || "").trim().toLowerCase();
-      const a = (el.getAttribute("title") || el.getAttribute("aria-label") || "").trim().toLowerCase();
-      return labels.some(l => t === l || t.includes(l) || a === l || a.includes(l));
-    };
-    return nodes.find(el => isVisible(el) && !el.disabled && m(el));
-  }
-
-  // ===== COMPOSER PRIMER =====
-  function blockIsEmpty(el) {
-    if (!el) return true;
-    const html = (el.innerHTML || "").trim();
-    return html === "" || html === "<br>";
-  }
-
-  function getCurrentBlock(idoc) {
+  function getCaretBlock(idoc) {
     const sel = idoc.getSelection && idoc.getSelection();
-    let node = sel && sel.anchorNode;
-    if (!node) return null;
-    if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
-    while (node && node.parentElement && node.parentElement !== idoc.body) node = node.parentElement;
-    return (node && node.parentElement === idoc.body) ? node : idoc.body.firstElementChild || idoc.body;
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) return null;
+    let node = sel.anchorNode;
+    if (node && node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+    if (!node || node === idoc.body || !idoc.body.contains(node)) return null;
+    return node.closest(BLOCK_SEL);
   }
 
-  function primeBlockIfEmpty(idoc, block) {
+  // "Empty" = no visible text or media. Covers "<br>", leftover empty wrappers after
+  // select-all + delete, and lines that only hold our zero-width space.
+  function isEmptyBlock(el) {
+    if (el.querySelector('img,table,hr,iframe,video')) return false;
+    return (el.textContent || '').replace(/[\u200B\u00A0\s]/g, '') === '';
+  }
+
+  // True when the caret's line (the text between <br>s around the caret) is empty. Shift+Enter
+  // inserts a <br> and can leave the caret outside the coloured span, in a block that isn't empty.
+  function caretLineIsEmpty(idoc, block, caret) {
+    const lineText = (frag, lastLine) => {
+      const lines = [''];
+      const w = idoc.createTreeWalker(frag, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        if (n.nodeType === Node.TEXT_NODE) lines[lines.length - 1] += n.textContent;
+        else if (n.tagName === 'BR') lines.push('');
+      }
+      return (lastLine ? lines[lines.length - 1] : lines[0]).replace(/[​ \s]/g, '');
+    };
+    const before = idoc.createRange();
+    before.setStart(block, 0);
+    before.setEnd(caret.startContainer, caret.startOffset);
+    const after = idoc.createRange();
+    after.setStart(caret.startContainer, caret.startOffset);
+    after.setEnd(block, block.childNodes.length);
+    return lineText(before.cloneContents(), true) === '' && lineText(after.cloneContents(), false) === '';
+  }
+
+  function hasExplicitColour(node, block) {
+    for (let n = node; n; n = n.parentElement) {
+      if (n.style?.color || (n.tagName === 'FONT' && n.getAttribute('color'))) return true;
+      if (n === block) break;
+    }
+    return false;
+  }
+
+  function primeCaretBlock(idoc) {
+    const block = getCaretBlock(idoc);
     if (!block) return;
-    if (!blockIsEmpty(block)) return;
+    const sel = idoc.getSelection();
+    const caret = sel.getRangeAt(0);
+    const blockEmpty = isEmptyBlock(block);
+    if (!blockEmpty && !caretLineIsEmpty(idoc, block, caret)) return;
 
-    if (!block.style.lineHeight) block.style.lineHeight = String(LINE_HEIGHT);
-    if (!block.style.letterSpacing) block.style.letterSpacing = "0.5px";
-
-    let span = block.querySelector(':scope > span.colour');
-    if (!span) {
-      span = idoc.createElement('span');
-      span.className = 'colour';
-      span.setAttribute('style', `color:${BRAND_COLOR}`);
-      span.textContent = '\u200B'; // ZWSP
-      block.innerHTML = "";
-      block.appendChild(span);
-      block.appendChild(idoc.createElement('br'));
+    if (blockEmpty) {
+      // Set per block (incl. <li>), because Zoho doesn't carry these onto new list items.
+      if (!block.style.lineHeight) block.style.lineHeight = String(LINE_HEIGHT);
+      if (!block.style.letterSpacing) block.style.letterSpacing = LETTER_SPACING;
     }
 
-    try {
-      const sel = idoc.getSelection();
-      const range = idoc.createRange();
-      const t = span.firstChild;
-      range.setStart(t, t.length);
-      range.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      idoc.body.focus();
-    } catch { }
+    let anchor = sel.anchorNode;
+    if (anchor.nodeType === Node.TEXT_NODE) anchor = anchor.parentElement;
+    if (hasExplicitColour(anchor, block)) return; // brand colour already carried over, or user picked a colour
+
+    const span = idoc.createElement('span');
+    span.className = 'colour';
+    span.setAttribute('style', `color:${BRAND_COLOR}`);
+    const text = idoc.createTextNode('\u200B'); // ZWSP keeps the caret inside the span
+    span.appendChild(text);
+
+    if (blockEmpty && !block.querySelector('*:not(br)')) {
+      block.textContent = '';
+      block.appendChild(span);
+      block.appendChild(idoc.createElement('br'));
+    } else {
+      caret.insertNode(span);
+    }
+
+    const range = idoc.createRange();
+    range.setStart(text, 1);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
   }
 
-  function primeOnFocus() {
-    const { idoc } = getEditor();
-    if (!idoc) return;
-    const blk = getCurrentBlock(idoc);
-    primeBlockIfEmpty(idoc, blk);
+  const isTypingKey = (e) =>
+    !!e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing;
+
+  // ===== SHORTCUTS (Ctrl+Enter = send/save, Ctrl+Shift+D = discard) =====
+  // Buttons are looked up inside the composer the key was pressed in, by Zoho's data-id.
+  // Matching button text page-wide used to hit "Reply All" / "Reply Actions" instead.
+  function clickComposerButton(fromEl, selector) {
+    const root = fromEl?.closest?.(COMPOSER_ROOT_SEL);
+    if (!root) return false;
+    const btn = Array.from(root.querySelectorAll(selector)).find(el => isVisible(el) && !el.disabled);
+    if (!btn) return false;
+    btn.click();
+    return true;
   }
 
-  function primeBeforeSend() {
-    const { idoc } = getEditor();
-    if (!idoc) return;
-    const blk = getCurrentBlock(idoc) || idoc.body.firstElementChild;
-    primeBlockIfEmpty(idoc, blk);
+  function handleShortcut(e, fromEl) {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    let selector = null;
+    if (!e.shiftKey && e.key === 'Enter') selector = SEND_BTN_SEL;
+    else if (e.shiftKey && (e.key === 'd' || e.key === 'D')) selector = DISCARD_BTN_SEL;
+    if (!selector) return;
+    if (clickComposerButton(fromEl, selector)) {
+      // Stop Zoho's own Ctrl+Enter handling too, so a reply can't be sent twice.
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
   }
 
-  function watchEditor() {
-    (async () => {
-      while (true) {
-        const { idoc } = getEditor();
-        if (idoc && !idoc.__zdPrimed) {
-          idoc.__zdPrimed = true;
-          primeBlockIfEmpty(idoc, idoc.body.firstElementChild || idoc.body);
-          idoc.addEventListener('focusin', primeOnFocus, true);
-
-          idoc.addEventListener('keydown', (e) => {
-            const ctrl = e.ctrlKey || e.metaKey;
-            const shift = e.shiftKey;
-            if (ctrl && !shift && e.key === "Enter") { e.preventDefault(); sendAction(); }
-            if (ctrl && shift && (e.key === "d" || e.key === "D")) { e.preventDefault(); discardAction(); }
-          }, true);
-        }
-        await sleep(800);
-      }
-    })();
+  // One shared listener: re-adding the same function is a no-op, so it's safe to re-wire on
+  // every scan (Zoho creates a fresh iframe document each time a composer opens).
+  function onEditorKeydown(e) {
+    const idoc = e.currentTarget;
+    if (isTypingKey(e)) { try { primeCaretBlock(idoc); } catch { } return; }
+    handleShortcut(e, idoc.defaultView?.frameElement);
   }
 
-  // ===== SHORTCUTS =====
-  function sendAction() {
-    primeBeforeSend();
-    const btn = findActionButton(["send", "reply", "submit"]);
-    if (btn) { btn.click(); return; }
-    const { frame } = getEditor();
-    const form = frame && (frame.closest('form') || document.querySelector('form[method][action*="reply"]'));
-    if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); }
+  function watchEditors() {
+    const wire = () => document.querySelectorAll(EDITOR_IFRAME_SEL).forEach(f => {
+      try { f.contentDocument?.addEventListener('keydown', onEditorKeydown, true); } catch { }
+    });
+    wire();
+    setInterval(wire, 800);
   }
-  function discardAction() {
-    const btn = findActionButton(["discard", "discard draft", "cancel"]);
-    if (btn) btn.click();
-  }
+
   function installTopShortcuts() {
-    if (document.__zdShortcutsInstalled) return;
-    document.__zdShortcutsInstalled = true;
-    document.addEventListener('keydown', (e) => {
-      const ctrl = e.ctrlKey || e.metaKey;
-      const shift = e.shiftKey;
-      if (ctrl && !shift && e.key === "Enter") { e.preventDefault(); sendAction(); }
-      if (ctrl && shift && (e.key === "d" || e.key === "D")) { e.preventDefault(); discardAction(); }
-    }, true);
-  }
-  function installSendHook() {
-    if (document.__zdSendHookInstalled) return;
-    document.__zdSendHookInstalled = true;
-    const capture = (e) => {
-      const el = e.target;
-      if (!el) return;
-      const label = ((el.innerText || el.textContent || "") + " " + (el.getAttribute('aria-label') || "") + " " + (el.getAttribute('title') || "")).toLowerCase();
-      if (/send|reply|submit/.test(label)) primeBeforeSend();
-    };
-    document.addEventListener('pointerdown', capture, true);
-    document.addEventListener('click', capture, true);
+    // For focus in composer fields outside the editor iframe (To/CC/Subject).
+    document.addEventListener('keydown', (e) => handleShortcut(e, document.activeElement), true);
   }
 
   // ===== VIEWER (proxy fetch + overlay) =====
@@ -315,8 +332,7 @@
   (function init() {
     injectOverlayCSS();
     installTopShortcuts();
-    installSendHook();
-    watchEditor();
+    watchEditors();
     installAttachmentInterceptor();
   })();
 })();
