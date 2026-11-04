@@ -137,7 +137,7 @@
         if (row) return row;
 
         // Fallback: last flex/grid row with any buttons
-        const rows = shell.querySelectorAll('[data-test-id="containerComponent"],[data-selector-id="container"],div,section,footer');
+        const rows = shell.querySelectorAll('[data-id="containerComponent"],[data-test-id="containerComponent"],[data-selector-id="container"],div,section,footer');
         for (const r of rows) {
             const cls = r.className || '';
             if (/\breplyfooter-sendBtn\b/.test(cls)) continue; // do not attach inside send button container

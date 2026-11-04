@@ -162,7 +162,8 @@
 
   // ===== VIEWER (proxy fetch + overlay) =====
   function getSiblingAttachments(originEl) {
-    const container = originEl?.closest?.('[data-test-id="attachments"]');
+    // Zoho renamed data-test-id -> data-id; accept both.
+    const container = originEl?.closest?.('[data-id="attachments"], [data-test-id="attachments"]');
     if (!container) return [];
     return Array.from(container.querySelectorAll('.zd_v2-attachment-attachment')).map(card => {
       const a = card.parentElement?.querySelector('.zd_v2-attachment-attachDownload');
@@ -255,7 +256,12 @@
   }
 
   function openAttachmentViaViewer(originEl, href) {
-    const items = getSiblingAttachments(originEl);
+    let items = getSiblingAttachments(originEl);
+    // Never open the viewer with an empty list (that produced "No source URL.")
+    if (!items.some(x => x.href === href)) {
+      const nameEl = originEl?.querySelector?.('.zd_v2-attachment-atatchName');
+      items = [{ href, filename: (nameEl?.getAttribute('data-title') || nameEl?.textContent || '').trim() }];
+    }
     const list = items.map(x => x.href);
     const names = items.map(x => x.filename);
     const index = Math.max(0, list.indexOf(href));
